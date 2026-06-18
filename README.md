@@ -12,7 +12,7 @@ If you already run `mcporter serve` for Claude Code, this extension piggybacks o
 
 ## What it does
 
-The extension reads its settings file, figures out which mcporter servers to surface, opens a Streamable HTTP MCP client to `<baseUrl>/<server>` for each one, calls `tools/list`, and registers every returned tool with pi as `<toolPrefix><server>__<tool>`. The MCP `inputSchema` (JSON Schema) is passed through to pi's tool registry untouched, so the agent gets the real argument shape.
+The extension reads its settings file, figures out which mcporter servers to surface, opens a Streamable HTTP MCP client to `<baseUrl>/<server>` for each one, calls `tools/list`, and registers every returned tool with pi as `<toolPrefix><server>__<tool>`. The MCP `inputSchema` is passed through to pi's tool registry. The bridge bounds untrusted metadata defensively: descriptions over 8 KB are clamped, schemas over 64 KB or with non-object roots are substituted with a permissive fallback, and oversized result payloads are capped before they reach pi's display buffer.
 
 Each tool call is forwarded to the live MCP server through the bridge. Output is rendered, truncated to pi's default size limits, and spilled to a temp file when oversized.
 
@@ -167,7 +167,7 @@ If you need the aggregate shape (one giant tool that does everything), use the o
 
 ## Security
 
-`baseUrl` and per-server `url` are unvalidated by the extension. If you point them at a non-local host (corporate bridge, dev tunnel, anything that isn't `127.0.0.1`), every tool the agent calls is being relayed to that host. The default `127.0.0.1:4748` matches mcporter's launchd convention; anything else is on you.
+`baseUrl` and per-server `url` are syntactically validated (must parse as `http://` or `https://` URL). A bad `baseUrl` refuses to start so traffic is not silently rerouted; a bad per-server `url` skips that one server. But the URL target is still on you. If you point at a non-local host (corporate bridge, dev tunnel, anything that isn't `127.0.0.1`), every tool the agent calls is relayed to that host. The default `127.0.0.1:4748` matches mcporter's launchd convention; anything else is on you.
 
 The extension writes only to `os.tmpdir()` (oversized tool output spilled to disk) and reads only from `~/.pi/agent/pi-mcporter-bridge.json` and your configured `mcporterConfigPath`.
 

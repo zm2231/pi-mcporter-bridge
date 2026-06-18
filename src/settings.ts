@@ -16,6 +16,13 @@ export const DEFAULT_TOOL_PREFIX = "mcp_";
 export type ServerEntry = {
   name: string;
   url?: string;
+  /**
+   * True when the user provided a `url` field that failed validation.
+   * index.ts uses this to skip the server with a clear log rather than
+   * silently falling back to baseUrl + name, which would call a different
+   * server than the user intended.
+   */
+  urlInvalid?: boolean;
   enabled: boolean;
   include?: string[];
   exclude?: string[];
@@ -108,14 +115,8 @@ function normalize(value: unknown, home: string): BridgeSettings {
     throw new Error("pi-mcporter-bridge: settings must be a JSON object.");
   }
 
-  const baseUrl =
-    typeof value.baseUrl === "string" && value.baseUrl.trim().length > 0
-      ? value.baseUrl.trim().replace(/\/+$/, "")
-      : DEFAULT_BASE_URL;
-  const toolPrefix =
-    typeof value.toolPrefix === "string"
-      ? value.toolPrefix
-      : DEFAULT_TOOL_PREFIX;
+  const baseUrl = normalizeBaseUrl(value.baseUrl);
+  const toolPrefix = normalizeToolPrefix(value.toolPrefix);
   const callTimeoutMs = positiveInt(value.callTimeoutMs, DEFAULT_CALL_TIMEOUT_MS);
   const connectTimeoutMs = positiveInt(
     value.connectTimeoutMs,
@@ -153,15 +154,95 @@ function normalizeServers(value: unknown): ServerEntry[] {
     if (!isRecord(entry)) continue;
     const name = typeof entry.name === "string" ? entry.name.trim() : "";
     if (name.length === 0) continue;
+    const validated = validateOptionalUrl(entry.url, `server "${name}".url`);
     out.push({
       name,
-      url: typeof entry.url === "string" ? entry.url : undefined,
+      url: validated.url,
+      urlInvalid: validated.invalid,
       enabled: entry.enabled !== false,
       include: normalizeStringArray(entry.include),
       exclude: normalizeStringArray(entry.exclude),
     });
   }
   return out;
+}
+
+/**
+ * Validate and normalize a base URL. Throws on bad input so the whole
+ * extension refuses to load loudly rather than silently routing every
+ * server to a different (default) target.
+ */
+function normalizeBaseUrl(value: unknown): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return DEFAULT_BASE_URL;
+  }
+  const trimmed = value.trim().replace(/\/+$/, "");
+  if (!isValidHttpUrl(trimmed)) {
+    throw new Error(
+      `pi-mcporter-bridge: settings.baseUrl "${trimmed}" is not a valid http(s) URL. Refusing to start so traffic is not silently rerouted. Fix the URL or remove the field to use the default ${DEFAULT_BASE_URL}.`,
+    );
+  }
+  return trimmed;
+}
+
+/**
+ * Validate an optional per-server URL.
+ *   missing / empty -> { url: undefined, invalid: false } (use baseUrl + name)
+ *   present + valid -> { url: trimmed,   invalid: false }
+ *   present + bad   -> { url: undefined, invalid: true  } (index.ts skips server)
+ * The `invalid: true` flag prevents silent fallback to baseUrl + name, which
+ * would call a different server than the user intended.
+ */
+function validateOptionalUrl(
+  value: unknown,
+  context: string,
+): { url: string | undefined; invalid: boolean } {
+  if (typeof value !== "string") return { url: undefined, invalid: false };
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return { url: undefined, invalid: false };
+  if (!isValidHttpUrl(trimmed)) {
+    console.error(
+      `[pi-mcporter-bridge] ${context} "${trimmed}" is not a valid http(s) URL; this server will be skipped (not silently rerouted to baseUrl)`,
+    );
+    return { url: undefined, invalid: true };
+  }
+  return { url: trimmed, invalid: false };
+}
+
+/**
+ * Validate the configured tool prefix. pi tool names must match
+ * /^[A-Za-z0-9_]+$/. We allow the user to set their own prefix but reject
+ * non-conforming or oversized input, falling back to the default with a
+ * warning so traffic is not silently rerouted via an invalid prefix.
+ */
+function normalizeToolPrefix(value: unknown): string {
+  if (typeof value !== "string") return DEFAULT_TOOL_PREFIX;
+  // Empty string is a deliberate "no prefix" config: tools register as
+  // <server>__<tool> rather than mcp_<server>__<tool>. README documents
+  // this behavior, so we honor it instead of overriding with the default.
+  if (value.length === 0) return "";
+  if (value.length > 32) {
+    console.error(
+      `[pi-mcporter-bridge] settings.toolPrefix too long (${value.length} chars, max 32), using default "${DEFAULT_TOOL_PREFIX}"`,
+    );
+    return DEFAULT_TOOL_PREFIX;
+  }
+  if (!/^[A-Za-z0-9_]+$/.test(value)) {
+    console.error(
+      `[pi-mcporter-bridge] settings.toolPrefix "${value}" contains characters outside [A-Za-z0-9_], using default "${DEFAULT_TOOL_PREFIX}"`,
+    );
+    return DEFAULT_TOOL_PREFIX;
+  }
+  return value;
+}
+
+function isValidHttpUrl(value: string): boolean {
+  try {
+    const u = new URL(value);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 function normalizeStringArray(value: unknown): string[] | undefined {
@@ -172,8 +253,26 @@ function normalizeStringArray(value: unknown): string[] | undefined {
   return out.length > 0 ? out : undefined;
 }
 
+/**
+ * Node's setTimeout takes a 32-bit signed int max (~24.8 days). Larger
+ * values silently wrap to 1ms and fire immediately. We also cap below
+ * that to a documented 1-hour ceiling for any single timeout: longer
+ * waits are almost certainly misconfiguration.
+ */
+const MAX_TIMEOUT_MS = 60 * 60 * 1000;
+
 function positiveInt(value: unknown, fallback: number): number {
-  return typeof value === "number" && value > 0 ? Math.floor(value) : fallback;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+  const floored = Math.floor(value);
+  if (floored > MAX_TIMEOUT_MS) {
+    console.error(
+      `[pi-mcporter-bridge] timeout ${floored}ms exceeds ${MAX_TIMEOUT_MS}ms ceiling, clamping`,
+    );
+    return MAX_TIMEOUT_MS;
+  }
+  return floored;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
