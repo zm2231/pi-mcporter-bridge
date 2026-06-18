@@ -1,0 +1,57 @@
+{
+  "name": "@zm2231/pi-mcporter-bridge",
+  "version": "0.1.0",
+  "description": "pi extension that registers each mcporter-managed MCP server's tools natively into pi by attaching to a running `mcporter serve` over Streamable HTTP. Per-server allowlist; tools surface to the agent as first-class pi tools.",
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "mcp",
+    "model-context-protocol",
+    "mcporter"
+  ],
+  "author": "zm2231",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zm2231/pi-mcporter-bridge.git"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "scripts": {
+    "build": "rm -rf dist && esbuild src/index.ts --bundle --format=esm --platform=node --outfile=dist/index.js --external:@modelcontextprotocol/sdk --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-ai --external:@earendil-works/pi-tui --external:typebox",
+    "prepare": "npm run build",
+    "prepack": "npm run build",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@types/node": "^24.3.0",
+    "esbuild": "^0.25.10",
+    "typebox": "*",
+    "typescript": "^5.9.3"
+  }
+}
