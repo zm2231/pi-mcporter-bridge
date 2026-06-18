@@ -1,6 +1,6 @@
 {
   "name": "@zm2231/pi-mcporter-bridge",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "pi extension that registers each mcporter-managed MCP server's tools natively into pi by attaching to a running `mcporter serve` over Streamable HTTP. Per-server allowlist; tools surface to the agent as first-class pi tools.",
   "type": "module",
   "files": [
