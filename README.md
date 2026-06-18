@@ -33,7 +33,7 @@ The extension does not start, restart, or manage the serve process. If the bridg
 ## Install
 
 ```bash
-npm install @zm2231/pi-mcporter-bridge
+npm install @zmerchant/pi-mcporter-bridge
 ```
 
 The package exposes a pi extension at `dist/index.js`. pi picks it up via the `pi.extensions` field in `package.json`; no separate registration step.
