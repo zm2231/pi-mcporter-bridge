@@ -16,12 +16,7 @@ export const DEFAULT_TOOL_PREFIX = "mcp_";
 export type ServerEntry = {
   name: string;
   url?: string;
-  /**
-   * True when the user provided a `url` field that failed validation.
-   * index.ts uses this to skip the server with a clear log rather than
-   * silently falling back to baseUrl + name, which would call a different
-   * server than the user intended.
-   */
+  // Set when a configured `url` failed validation; index.ts skips the server.
   urlInvalid?: boolean;
   enabled: boolean;
   include?: string[];
@@ -167,11 +162,7 @@ function normalizeServers(value: unknown): ServerEntry[] {
   return out;
 }
 
-/**
- * Validate and normalize a base URL. Throws on bad input so the whole
- * extension refuses to load loudly rather than silently routing every
- * server to a different (default) target.
- */
+// Throws on bad input; we refuse to start rather than reroute to the default.
 function normalizeBaseUrl(value: unknown): string {
   if (typeof value !== "string" || value.trim().length === 0) {
     return DEFAULT_BASE_URL;
@@ -185,14 +176,8 @@ function normalizeBaseUrl(value: unknown): string {
   return trimmed;
 }
 
-/**
- * Validate an optional per-server URL.
- *   missing / empty -> { url: undefined, invalid: false } (use baseUrl + name)
- *   present + valid -> { url: trimmed,   invalid: false }
- *   present + bad   -> { url: undefined, invalid: true  } (index.ts skips server)
- * The `invalid: true` flag prevents silent fallback to baseUrl + name, which
- * would call a different server than the user intended.
- */
+// missing/empty -> use baseUrl + name; bad -> mark invalid so index.ts skips
+// rather than silently rerouting.
 function validateOptionalUrl(
   value: unknown,
   context: string,
@@ -209,17 +194,9 @@ function validateOptionalUrl(
   return { url: trimmed, invalid: false };
 }
 
-/**
- * Validate the configured tool prefix. pi tool names must match
- * /^[A-Za-z0-9_]+$/. We allow the user to set their own prefix but reject
- * non-conforming or oversized input, falling back to the default with a
- * warning so traffic is not silently rerouted via an invalid prefix.
- */
+// Empty string is honored as a deliberate "no prefix" config.
 function normalizeToolPrefix(value: unknown): string {
   if (typeof value !== "string") return DEFAULT_TOOL_PREFIX;
-  // Empty string is a deliberate "no prefix" config: tools register as
-  // <server>__<tool> rather than mcp_<server>__<tool>. README documents
-  // this behavior, so we honor it instead of overriding with the default.
   if (value.length === 0) return "";
   if (value.length > 32) {
     console.error(
@@ -253,12 +230,7 @@ function normalizeStringArray(value: unknown): string[] | undefined {
   return out.length > 0 ? out : undefined;
 }
 
-/**
- * Node's setTimeout takes a 32-bit signed int max (~24.8 days). Larger
- * values silently wrap to 1ms and fire immediately. We also cap below
- * that to a documented 1-hour ceiling for any single timeout: longer
- * waits are almost certainly misconfiguration.
- */
+// 1-hour ceiling; Node's setTimeout silently wraps past ~24.8 days.
 const MAX_TIMEOUT_MS = 60 * 60 * 1000;
 
 function positiveInt(value: unknown, fallback: number): number {

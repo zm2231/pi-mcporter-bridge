@@ -8,26 +8,9 @@ import {
   truncateTail,
 } from "@earendil-works/pi-coding-agent";
 
-/**
- * Hard cap (in UTF-8 bytes) on the string we feed into truncateTail.
- * Untrusted MCP servers can return arbitrarily large content; we cap raw
- * at 4 MB during accumulation AND before any pi-side truncation.
- */
 const RAW_OUTPUT_CAP_BYTES = 4 * 1024 * 1024;
-
-/**
- * Per-part cap inside renderCallResult.
- */
 const PART_CAP_BYTES = 1 * 1024 * 1024;
-
-/**
- * Maximum depth boundedSerialize traverses before substituting a summary.
- * Defends against pathological deeply nested payloads that could blow the
- * call stack.
- */
 const MAX_SERIALIZE_DEPTH = 32;
-
-/** Reserved room (in bytes) for cap markers so total output stays under cap. */
 const MARKER_RESERVE_BYTES = 256;
 
 export type ShapedOutput = {
@@ -36,12 +19,8 @@ export type ShapedOutput = {
   fullOutputPath?: string;
 };
 
-/**
- * Bounded UTF-8 byte accumulator. Tracks byte cost INCLUDING the separator
- * cost added on each push after the first, reserves MARKER_RESERVE_BYTES of
- * budget so the cap marker fits inside the cap, and trims the last admitted
- * fragment if necessary to make room for the marker.
- */
+// UTF-8 byte accumulator that reserves marker budget and trims the last
+// admitted fragment to make room for it.
 class BoundedJoiner {
   private parts: string[] = [];
   private totalBytes = 0;
@@ -111,8 +90,6 @@ export function renderCallResult(raw: unknown): {
     if (item.type === "text" && typeof item.text === "string") {
       joiner.push(clipBytes(item.text, PART_CAP_BYTES));
     } else if (item.type === "resource" && isRecord(item.resource)) {
-      // Clip URI before template interpolation so a hostile server cannot
-      // force a multi-MB intermediate string into memory.
       const rawUri = typeof item.resource.uri === "string"
         ? item.resource.uri
         : "<resource>";
@@ -146,8 +123,6 @@ export function renderCallResult(raw: unknown): {
 }
 
 export async function shapeOutput(output: string): Promise<ShapedOutput> {
-  // Defense in depth: renderCallResult should already have capped, but if a
-  // caller passes us a pre-stringified blob we cap again before truncateTail.
   const { text: bounded, capped: rawCapped } = capRawOutput(output);
   const truncation = truncateTail(bounded, {
     maxBytes: DEFAULT_MAX_BYTES,
@@ -166,23 +141,15 @@ export async function shapeOutput(output: string): Promise<ShapedOutput> {
   text += `\n\n[Output truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines`;
   text += ` (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}).`;
   text += ` ${omittedLines} line(s) and ${formatSize(omittedBytes)} omitted.`;
-  // Be honest about what the temp file contains. If the raw cap fired, the
-  // temp file holds the capped version, not the true original.
   const label = rawCapped ? "Capped output" : "Full output";
   text += ` ${label} saved to: ${fullOutputPath}]`;
 
   return { text, truncated: true, fullOutputPath };
 }
 
-/**
- * Cap raw output ONLY when it actually exceeds the hard cap. Pass-through
- * when the input already fits. Returns a flag so callers can label the
- * temp file accurately (capped vs full).
- */
 function capRawOutput(output: string): { text: string; capped: boolean } {
   const len = byteLen(output);
   if (len <= RAW_OUTPUT_CAP_BYTES) return { text: output, capped: false };
-  // Reserve marker budget only on the truncation path.
   const head = sliceByBytes(output, RAW_OUTPUT_CAP_BYTES - MARKER_RESERVE_BYTES);
   const omitted = len - byteLen(head);
   const text = `${head}\n\n[raw output capped: ${formatSize(omitted)} omitted before pi truncation]`;
@@ -195,13 +162,7 @@ function clipBytes(s: string, maxBytes: number): string {
   return `${head}\n[clipped: ${formatSize(byteLen(s) - byteLen(head))} omitted]`;
 }
 
-/**
- * Walk a JSON-like value and report whether it would serialize under
- * `budgetBytes`. Returns true when the value fits; false when it would
- * exceed the budget. Does NOT materialize the full string for caller use,
- * so safe to call on untrusted schemas/payloads. Bounded recursion via
- * MAX_SERIALIZE_DEPTH prevents stack blowup.
- */
+// Does not materialize the full string; safe on untrusted input.
 export function fitsWithinBytes(value: unknown, budgetBytes: number): boolean {
   const ctx = { remaining: budgetBytes, overflow: false };
   countNode(value, ctx, 0);
@@ -229,10 +190,6 @@ function countNode(
   if (value === null) return charge(4);
   switch (typeof value) {
     case "string":
-      // Charge the ACTUAL JSON-encoded byte cost via a streaming counter
-      // that accounts for escape expansion (e.g. \u0000 = 6 bytes). The
-      // counter early-exits once cost exceeds remaining, so a hostile huge
-      // string never allocates.
       return chargeJsonStringCost(ctx, value);
     case "number":
     case "boolean":
@@ -254,14 +211,11 @@ function countNode(
   }
   if (typeof value === "object") {
     charge(2); // { }
-    // for..in instead of Object.entries to avoid materializing a [key,value]
-    // array. hasOwnProperty.call handles Object.create(null) safely.
     let i = 0;
     for (const k in value as Record<string, unknown>) {
       if (ctx.overflow) return;
       if (!Object.prototype.hasOwnProperty.call(value, k)) continue;
       if (i > 0) charge(1);
-      // Key uses the same escape-aware counter, plus colon.
       chargeJsonStringCost(ctx, k);
       charge(1);
       countNode((value as Record<string, unknown>)[k], ctx, depth + 1);
@@ -272,16 +226,7 @@ function countNode(
   charge(4);
 }
 
-/**
- * Stream-walk a string and charge the ctx for its JSON-encoded UTF-8 byte
- * cost without materializing the encoded form. Early-exits once cost
- * exceeds the remaining budget. JSON.stringify expands per spec:
- *   "      -> \"     (2 bytes)
- *   \      -> \\     (2 bytes)
- *   \b\t\n\f\r       (2 bytes each, escaped form)
- *   other < 0x20 -> \u00XX (6 bytes)
- *   regular -> UTF-8 byte count of that code point
- */
+// Streams JSON-encoded cost (escape-aware) without allocating the encoded string.
 function chargeJsonStringCost(
   ctx: { remaining: number; overflow: boolean },
   s: string,
@@ -305,9 +250,6 @@ function chargeJsonStringCost(
     else if (code < 0x80) cost += 1;
     else if (code < 0x800) cost += 2;
     else if (code >= 0xd800 && code <= 0xdbff) {
-      // High surrogate: only consume the pair as 4 bytes when the next code
-      // unit is a low surrogate (valid pair). A lone high surrogate would
-      // get JSON-escaped as \uXXXX (6 bytes), so charge that.
       const next = s.charCodeAt(i + 1);
       if (next >= 0xdc00 && next <= 0xdfff) {
         i += 1;
@@ -316,7 +258,6 @@ function chargeJsonStringCost(
         cost += 6;
       }
     } else if (code >= 0xdc00 && code <= 0xdfff) {
-      // Lone low surrogate: JSON-escaped as \uXXXX (6 bytes).
       cost += 6;
     } else cost += 3;
     if (cost > ctx.remaining) {
@@ -327,12 +268,6 @@ function chargeJsonStringCost(
   ctx.remaining -= cost;
 }
 
-/**
- * Walk a JSON-like value and produce a string under `budgetBytes` UTF-8 bytes.
- * Stops descending when budget runs out and substitutes a "[...truncated]"
- * marker. Bounded recursion (MAX_SERIALIZE_DEPTH) prevents stack blowup on
- * adversarial deeply-nested payloads.
- */
 function boundedSerialize(value: unknown, budgetBytes: number): string {
   const ctx = { remaining: budgetBytes, overflow: false };
   const out = serializeNode(value, ctx, 0);
@@ -355,19 +290,12 @@ function serializeNode(
   if (value === null) return spend(ctx, "null");
   switch (typeof value) {
     case "string": {
-      // Use the escape-aware cost counter (no allocation). If the actual
-      // JSON-encoded bytes fit, allocate and emit. If not, clip the raw
-      // input to a byte budget BEFORE JSON.stringify so escape expansion
-      // can't blow past the budget during the call.
       const probe = { remaining: ctx.remaining, overflow: false };
       chargeJsonStringCost(probe, value);
       if (!probe.overflow) {
         return spend(ctx, JSON.stringify(value));
       }
-      // Clip via byte budget. Then probe AGAIN with the actual encoded cost
-      // including the " [clipped]" suffix, and shrink further if the escape
-      // expansion still overflows. Wrap the whole thing inside JSON.stringify
-      // so the result is valid JSON (no `"abc" [clipped]` shape).
+      // Clip in byte space, then reprobe with marker to handle escape expansion.
       let sliced = sliceByBytes(value, Math.max(0, ctx.remaining - 64));
       let withMarker = `${sliced} [clipped]`;
       let probe2 = { remaining: ctx.remaining, overflow: false };
@@ -403,22 +331,16 @@ function serializeNode(
   if (typeof value === "object") {
     const parts: string[] = [];
     parts.push(spend(ctx, "{"));
-    // for...in instead of Object.entries to avoid array materialization.
     let i = 0;
     for (const k in value as Record<string, unknown>) {
       if (ctx.overflow) break;
       if (!Object.prototype.hasOwnProperty.call(value, k)) continue;
       if (i > 0) parts.push(spend(ctx, ","));
-      // Clip key before JSON.stringify so a 1GB key name never allocates.
-      // Use the escape-aware cost counter so escape-heavy keys can't slip
-      // through a lower-bound check.
       const keyProbe = { remaining: ctx.remaining, overflow: false };
       chargeJsonStringCost(keyProbe, k);
       if (keyProbe.overflow) {
         const sliceBudget = Math.max(0, ctx.remaining - 64);
         const slicedKey = sliceByBytes(k, sliceBudget);
-        // Wrap "[clipped]" suffix inside the JSON string so the result
-        // remains valid JSON (no `"key"_clipped` shape).
         parts.push(spend(ctx, JSON.stringify(`${slicedKey} [clipped]`)));
       } else {
         parts.push(spend(ctx, JSON.stringify(k)));
@@ -444,25 +366,15 @@ function spend(ctx: { remaining: number; overflow: boolean }, s: string): string
   return s;
 }
 
-/** UTF-8 byte length of a string. */
 function byteLen(s: string): number {
   return Buffer.byteLength(s, "utf8");
 }
 
-/**
- * Slice s so the result is at most maxBytes UTF-8 bytes. Encodes once to a
- * Buffer and slices in byte space, avoiding the UTF-16-index pitfall where
- * multi-byte BMP characters produce a slice 2-3x over the byte cap. We back
- * off up to 3 trailing bytes to land on a clean UTF-8 boundary; the
- * subsequent toString("utf8") replaces any partial sequence with U+FFFD.
- */
+// Backs off to UTF-8 boundary; toString replaces partial sequences with U+FFFD.
 function sliceByBytes(s: string, maxBytes: number): string {
   if (maxBytes <= 0) return "";
   const buf = Buffer.from(s, "utf8");
   if (buf.length <= maxBytes) return s;
-  // Find the largest valid prefix length <= maxBytes that lands on a
-  // UTF-8 boundary. UTF-8 continuation bytes are 0b10xxxxxx, so walk back
-  // until we hit a non-continuation byte at position `cut`.
   let cut = maxBytes;
   while (cut > 0 && (buf[cut] !== undefined) && (buf[cut]! & 0xc0) === 0x80) {
     cut -= 1;
@@ -477,8 +389,6 @@ async function writeTempText(content: string): Promise<string> {
     await writeFile(file, content, "utf8");
     return file;
   } catch (err) {
-    // Don't leak the temp directory if writeFile failed. Best-effort cleanup;
-    // ignore secondary errors because we want to rethrow the original.
     await rm(dir, { recursive: true, force: true }).catch(() => {});
     throw err;
   }

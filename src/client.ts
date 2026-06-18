@@ -10,15 +10,8 @@ export type DiscoveredTool = {
   inputSchema: Record<string, unknown>;
 };
 
-/**
- * Per-server MCP client wrapper.
- *
- * Retry policy: listTools is idempotent and retried once on transport error.
- * callTool is NOT retried — MCP has no idempotency contract and a write tool
- * may have already executed server-side when the response packet was lost.
- * On transport error during callTool we reset the connection so the next call
- * reconnects fresh, but the failing call surfaces "call may have completed".
- */
+// listTools is idempotent and retried once on transport error.
+// callTool is not retried; MCP has no idempotency contract.
 export class ServerClient {
   private readonly url: URL;
   private readonly clientVersion: string;
@@ -56,7 +49,6 @@ export class ServerClient {
     } catch (err) {
       if (signal?.aborted) throw err;
       if (!isTransportError(err)) throw err;
-      // listTools is idempotent — safe to reconnect and retry once.
       await this.close();
       signal?.throwIfAborted();
       const fresh = await this.connect(connectTimeoutMs, signal);
@@ -80,12 +72,7 @@ export class ServerClient {
       });
     } catch (initialErr) {
       let err: unknown = initialErr;
-      // SDK throws "Not connected" SYNCHRONOUSLY before sending the request
-      // when the transport is already gone (e.g. serve restarted between
-      // our last call and this one). The request never went out, so a
-      // single transparent reconnect-and-retry is safe (no double-execute
-      // risk for write tools). Do NOT do this for "session not found",
-      // "connection closed" mid-flight, etc - those happened in-flight.
+      // "Not connected" is thrown before bytes leave the client; safe to retry.
       if (signal?.aborted === false && isNotConnectedError(err)) {
         await this.close();
         signal?.throwIfAborted();
@@ -100,28 +87,16 @@ export class ServerClient {
         }
       }
       if (signal?.aborted) throw err;
-      // Both transport errors and timeouts are AMBIGUOUS for tool calls:
-      // the server may have processed the request before the response was
-      // lost or before our timer fired. MCP has no idempotency contract, so
-      // we cannot retry and must surface ambiguity to the caller.
-      // Clamp the wire name (untrusted, from MCP server) so a hostile
-      // server cannot push huge strings into our error messages.
       const safeName = name.length > 256
         ? `${name.slice(0, 256)}...[+${name.length - 256}]`
         : name;
       if (isTimeoutError(err)) {
-        // Per-request timeout. Do NOT close the shared client: a tear-down
-        // would kill any concurrent in-flight calls on this server. The
-        // MCP SDK handles request-level cancellation; the connection stays
-        // usable. We still surface "may have completed" because the server
-        // may have processed the request before our timer fired.
         const original = err instanceof Error ? err.message : String(err);
         throw new Error(
           `timeout during ${safeName} (call may have completed server-side): ${original}`,
         );
       }
       if (isTransportError(err)) {
-        // Real connection problem: tear down so subsequent calls reconnect.
         await this.close();
         const original = err instanceof Error ? err.message : String(err);
         throw new Error(
@@ -195,36 +170,19 @@ export class ServerClient {
   }
 }
 
-/**
- * Detect the SDK's pre-send "Not connected" error. This is thrown
- * SYNCHRONOUSLY before any bytes leave the client, so a transparent
- * reconnect-and-retry is safe (no double-execute risk).
- */
 export function isNotConnectedError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
-  // SDK uses literal Error("Not connected") at protocol.js:619
   return err.message === "Not connected";
 }
 
-/**
- * Detect timeout errors that we caused (our withTimeout helper or the SDK's
- * own RequestTimeout). Used for tool calls to mark them "may have completed"
- * since the server may still process the request after our timer fires.
- *
- * Narrowed deliberately: we do NOT match arbitrary substrings of "timeout"
- * because application-level errors can legitimately contain that word (e.g.
- * "user did not respond before timeout"). False positives would mark every
- * such error ambiguous and force unnecessary reconnects.
- */
+// Narrowed: do not match arbitrary "timeout" substrings; application errors
+// can legitimately contain that word.
 export function isTimeoutError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   if (err.name === "AbortError") return false;
   const code = (err as { code?: number | string }).code;
-  if (code === -32001) return true; // McpError ErrorCode.RequestTimeout
-  // Match only timeouts our own withTimeout helper produced. Its message
-  // template is exactly `connect <url> timed out after <ms>ms[ (shared ceiling)]`.
+  if (code === -32001) return true;
   if (/^connect .* timed out after \d+ms/.test(err.message)) return true;
-  // SDK error name when it surfaces timeouts directly.
   if (err.name === "McpError" && /request timed out/i.test(err.message)) {
     return true;
   }
@@ -278,9 +236,6 @@ function withTimeout<T>(
       if (signal) signal.removeEventListener("abort", onAbort);
     };
 
-    // done() centralizes settlement so timer fire, abort, resolve, and reject
-    // all clean up listeners and timer. Prevents the leak where a timeout
-    // rejection left abort listeners attached to a long-lived signal.
     const done = (action: (v: unknown) => void, v: unknown): void => {
       if (settled) return;
       settled = true;
