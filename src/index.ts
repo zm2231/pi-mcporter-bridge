@@ -200,7 +200,8 @@ async function resolveServerSet(
 function resolveServerUrl(server: ServerEntry, baseUrl: string): string {
   if (server.url && server.url.trim().length > 0) return server.url.trim();
   const base = baseUrl.replace(/\/+$/, "");
-  return `${base}/${server.name}`;
+  // Encode so names containing /, ?, # do not silently reroute.
+  return `${base}/${encodeURIComponent(server.name)}`;
 }
 
 function filterTools(
@@ -229,8 +230,12 @@ function buildToolName(
 ): string | undefined {
   const serverSafe = sanitizeNamePart(serverName).slice(0, MAX_NAME_SEGMENT_CHARS);
   const toolSafe = sanitizeNamePart(toolName).slice(0, MAX_NAME_SEGMENT_CHARS);
-  if (serverSafe.length === 0 || toolSafe.length === 0) return undefined;
+  if (!hasAlnum(serverSafe) || !hasAlnum(toolSafe)) return undefined;
   return `${prefix}${serverSafe}__${toolSafe}`;
+}
+
+function hasAlnum(s: string): boolean {
+  return /[A-Za-z0-9]/.test(s);
 }
 
 // Caps for untrusted server metadata.

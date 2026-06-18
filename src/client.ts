@@ -73,7 +73,7 @@ export class ServerClient {
     } catch (initialErr) {
       let err: unknown = initialErr;
       // "Not connected" is thrown before bytes leave the client; safe to retry.
-      if (signal?.aborted === false && isNotConnectedError(err)) {
+      if (!signal?.aborted && isNotConnectedError(err)) {
         await this.close();
         signal?.throwIfAborted();
         client = await this.connect(connectTimeoutMs, signal);
