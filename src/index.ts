@@ -143,7 +143,7 @@ function buildToolName(
   serverName: string,
   toolName: string,
 ): string {
-  return sanitizeToolName(`${prefix}${serverName}__${toolName}`);
+  return `${prefix}${sanitizeNamePart(serverName)}__${sanitizeNamePart(toolName)}`;
 }
 
 function registerProxyTool(
@@ -196,7 +196,13 @@ function coerceObjectSchema(
   return { additionalProperties: true, ...schema, type: "object" };
 }
 
-function sanitizeToolName(name: string): string {
+/**
+ * Sanitize a single name segment (server or tool).
+ * Replaces illegal chars with _ and collapses runs of _ to a single _.
+ * Caller is responsible for joining segments with the __ separator so
+ * parsers can split <prefix><server>__<tool> back into parts.
+ */
+function sanitizeNamePart(name: string): string {
   return name.replace(/[^A-Za-z0-9_]/g, "_").replace(/_+/g, "_");
 }
 
